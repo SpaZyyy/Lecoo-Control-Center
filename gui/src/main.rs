@@ -1,16 +1,17 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::{
+    process::Command,
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::{Duration, Instant},
 };
 
 use eframe::egui::{self, Color32, RichText};
-use ipc::{IpcClient, IpcRequest, IpcResponse};
-use lecoo_types::{
-    caps::ChargeStatus,
-    ec_types::{FanIndex, FanMode, KeyboardBacklightLevel, PowerProfile},
-    settings::CurrentSettings,
-};
+use lecoo_types::ec_types::{FanIndex, FanMode, KeyboardBacklightLevel, PowerProfile};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 #[derive(Default, Clone)]
 struct Snapshot {
@@ -22,8 +23,10 @@ struct Snapshot {
     system_temp: Option<u8>,
     cpu_fan: Option<u16>,
     gpu_fan: Option<u16>,
-    charge: Option<ChargeStatus>,
-    settings: Option<CurrentSettings>,
+    charge_mode: Option<String>,
+    battery_percent: Option<u8>,
+    power_profile: Option<PowerProfile>,
+    keyboard_backlight: Option<KeyboardBacklightLevel>,
 }
 
 enum Action {
@@ -44,7 +47,7 @@ impl ControlCenter {
         let (action_tx, action_rx) = mpsc::channel();
         let (update_tx, update_rx) = mpsc::channel();
         thread::Builder::new()
-            .name("lecoo-gui-ipc".into())
+            .name("lecoo-gui-cli".into())
             .spawn(move || run_worker(action_rx, update_tx))
             .expect("failed to start the IPC worker");
 
@@ -97,17 +100,16 @@ impl eframe::App for ControlCenter {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(12.0);
             ui.heading("Overview");
-            ui.label(
-                self.snapshot
-                    .board
-                    .as_deref()
-                    .unwrap_or("Hardware status and controls"),
-            );
+            ui.label(self.snapshot.board.as_deref().unwrap_or("Hardware status and controls"));
             ui.add_space(14.0);
 
             ui.columns(4, |columns| {
                 metric(&mut columns[0], "CPU TEMPERATURE", value_with_unit(self.snapshot.cpu_temp, "°C"));
-                metric(&mut columns[1], "SYSTEM TEMPERATURE", value_with_unit(self.snapshot.system_temp, "°C"));
+                metric(
+                    &mut columns[1],
+                    "SYSTEM TEMPERATURE",
+                    value_with_unit(self.snapshot.system_temp, "°C"),
+                );
                 metric(&mut columns[2], "CPU FAN", value_with_unit(self.snapshot.cpu_fan, " RPM"));
                 metric(&mut columns[3], "GPU FAN", value_with_unit(self.snapshot.gpu_fan, " RPM"));
             });
@@ -118,7 +120,7 @@ impl eframe::App for ControlCenter {
                     ui.set_min_height(182.0);
                     ui.heading("Performance");
                     ui.label("Power profile");
-                    let profile = self.snapshot.settings.as_ref().map(|s| s.power_profile);
+                    let profile = self.snapshot.power_profile;
                     ui.horizontal_wrapped(|ui| {
                         for (choice, label) in [
                             (PowerProfile::Silent, "Quiet"),
@@ -139,26 +141,21 @@ impl eframe::App for ControlCenter {
 
                     ui.add_space(10.0);
                     ui.label("Fans");
-                    fan_controls(ui, &self.snapshot, &self.actions, FanIndex::Cpu, "CPU");
-                    fan_controls(ui, &self.snapshot, &self.actions, FanIndex::Gpu, "GPU");
+                    fan_controls(ui, self.snapshot.connected, &self.actions, FanIndex::Cpu, "CPU");
+                    fan_controls(ui, self.snapshot.connected, &self.actions, FanIndex::Gpu, "GPU");
                 });
 
                 columns[1].group(|ui| {
                     ui.set_min_height(182.0);
                     ui.heading("Battery & lighting");
-                    match &self.snapshot.charge {
-                        Some(status) => {
+                    match self.snapshot.battery_percent {
+                        Some(percent) => {
                             ui.horizontal(|ui| {
                                 ui.label("Battery");
-                                ui.label(RichText::new(format!("{}%", status.soc)).strong());
+                                ui.label(RichText::new(format!("{percent}%")).strong());
                             });
-                            if let Some((start, stop)) = status.thresholds {
-                                ui.label(format!("Charge window  {start}% – {stop}%"));
-                            } else {
-                                ui.label(format!("Charge mode  {:?}", status.effective));
-                            }
-                            if let Some(pending) = &status.pending {
-                                ui.label(RichText::new(pending).color(Color32::from_rgb(239, 181, 105)));
+                            if let Some(mode) = &self.snapshot.charge_mode {
+                                ui.label(format!("Charge mode  {mode}"));
                             }
                         }
                         None => {
@@ -168,12 +165,7 @@ impl eframe::App for ControlCenter {
 
                     ui.add_space(12.0);
                     ui.label("Keyboard backlight");
-                    let current = self
-                        .snapshot
-                        .settings
-                        .as_ref()
-                        .map(|s| s.keyboard_backlight)
-                        .unwrap_or(KeyboardBacklightLevel::Off);
+                    let current = self.snapshot.keyboard_backlight;
                     ui.horizontal_wrapped(|ui| {
                         for (choice, label) in [
                             (KeyboardBacklightLevel::Off, "Off"),
@@ -184,7 +176,7 @@ impl eframe::App for ControlCenter {
                             if ui
                                 .add_enabled(
                                     self.snapshot.connected,
-                                    egui::Button::new(label).selected(current == choice),
+                                    egui::Button::new(label).selected(current == Some(choice)),
                                 )
                                 .clicked()
                             {
@@ -207,7 +199,7 @@ impl eframe::App for ControlCenter {
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.separator();
                 ui.label(
-                    RichText::new("Changes are sent to the Lecoo daemon over local IPC.")
+                    RichText::new("Reads and changes use the installed lecoo-ctrl utility.")
                         .small()
                         .color(Color32::from_rgb(120, 127, 140)),
                 );
@@ -231,30 +223,14 @@ fn value_with_unit<T: std::fmt::Display>(value: Option<T>, unit: &str) -> String
     value.map(|value| format!("{value}{unit}")).unwrap_or_else(|| "—".into())
 }
 
-fn fan_controls(
-    ui: &mut egui::Ui,
-    snapshot: &Snapshot,
-    actions: &Sender<Action>,
-    fan: FanIndex,
-    label: &str,
-) {
-    let mode = snapshot.settings.as_ref().map(|settings| match fan {
-        FanIndex::Cpu => settings.fan_mode_cpu,
-        FanIndex::Gpu => settings.fan_mode_gpu,
-    });
+fn fan_controls(ui: &mut egui::Ui, connected: bool, actions: &Sender<Action>, fan: FanIndex, label: &str) {
     ui.horizontal(|ui| {
         ui.label(label);
-        ui.add_enabled_ui(snapshot.connected, |ui| {
-            if ui
-                .add(egui::Button::new("Auto").selected(mode == Some(FanMode::Auto)))
-                .clicked()
-            {
+        ui.add_enabled_ui(connected, |ui| {
+            if ui.button("Auto").clicked() {
                 let _ = actions.send(Action::SetFan(fan, FanMode::Auto));
             }
-            if ui
-                .add(egui::Button::new("Full").selected(mode == Some(FanMode::Full)))
-                .clicked()
-            {
+            if ui.button("Full").clicked() {
                 let _ = actions.send(Action::SetFan(fan, FanMode::Full));
             }
         });
@@ -263,87 +239,154 @@ fn fan_controls(
 
 fn run_worker(action_rx: Receiver<Action>, update_tx: Sender<Snapshot>) {
     let mut last_poll = Instant::now() - Duration::from_secs(2);
+    let mut last_details = Instant::now() - Duration::from_secs(10);
     let mut message: Option<String> = None;
+    let mut snapshot = Snapshot::default();
 
     loop {
-        match action_rx.recv_timeout(Duration::from_millis(250)) {
+        match action_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(action) => {
                 message = Some(send_action(action));
                 last_poll = Instant::now() - Duration::from_secs(2);
+                last_details = Instant::now() - Duration::from_secs(10);
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
 
         if last_poll.elapsed() >= Duration::from_secs(1) {
-            let mut snapshot = read_snapshot();
-            snapshot.message = message.clone();
-            if let Some(error) = &snapshot.error {
-                message = Some(error.clone());
-                snapshot.message = message.clone();
+            match read_telemetry(&mut snapshot) {
+                Ok(()) => {
+                    snapshot.connected = true;
+                    snapshot.error = None;
+                    if last_details.elapsed() >= Duration::from_secs(5) {
+                        read_details(&mut snapshot);
+                        last_details = Instant::now();
+                    }
+                }
+                Err(error) => {
+                    snapshot.connected = false;
+                    snapshot.error = Some(error);
+                    snapshot.cpu_temp = None;
+                    snapshot.system_temp = None;
+                    snapshot.cpu_fan = None;
+                    snapshot.gpu_fan = None;
+                }
             }
-            let _ = update_tx.send(snapshot);
+            snapshot.message = message.clone();
+            if update_tx.send(snapshot.clone()).is_err() {
+                break;
+            }
             last_poll = Instant::now();
         }
     }
 }
 
-fn read_snapshot() -> Snapshot {
-    let mut snapshot = Snapshot::default();
-    let mut client = match IpcClient::connect() {
-        Ok(client) => client,
-        Err(error) => {
-            snapshot.error = Some(format!("Could not connect to the daemon: {error}"));
-            return snapshot;
-        }
-    };
-    snapshot.connected = true;
+fn run_cli(args: &[&str]) -> Result<String, String> {
+    let mut command = Command::new("lecoo-ctrl.exe");
+    command.args(args);
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
 
-    if let Ok(IpcResponse::SystemInfo(info)) = client.request(&IpcRequest::GetSystemState) {
-        snapshot.board = Some(format!("{} · daemon {}", info.revision, info.daemon_version));
+    let output = command.output().map_err(|error| format!("Cannot start lecoo-ctrl: {error}"))?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if error.is_empty() {
+            format!("lecoo-ctrl {} failed ({})", args.join(" "), output.status)
+        } else {
+            error
+        });
     }
-    if let Ok(IpcResponse::Temps { cpu_c, sys_c }) = client.request(&IpcRequest::GetTemperatures) {
-        snapshot.cpu_temp = Some(cpu_c);
-        snapshot.system_temp = Some(sys_c);
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn read_telemetry(snapshot: &mut Snapshot) -> Result<(), String> {
+    let temps = run_cli(&["temps"])?;
+    let fans = run_cli(&["fans"])?;
+    let (cpu_temp, system_temp) = two_values(&temps).ok_or("Cannot read temperatures")?;
+    let (cpu_fan, gpu_fan) = two_values(&fans).ok_or("Cannot read fan speeds")?;
+    snapshot.cpu_temp = u8::try_from(cpu_temp).ok();
+    snapshot.system_temp = u8::try_from(system_temp).ok();
+    snapshot.cpu_fan = Some(cpu_fan);
+    snapshot.gpu_fan = Some(gpu_fan);
+    Ok(())
+}
+
+fn read_details(snapshot: &mut Snapshot) {
+    if let Ok(info) = run_cli(&["info"]) {
+        let lines: Vec<_> = info.lines().collect();
+        if let (Some(chip), Some(version)) = (lines.first(), lines.last()) {
+            snapshot.board = Some(format!("{} · {}", chip.trim(), version.trim()));
+        }
     }
-    if let Ok(IpcResponse::FanRpm { cpu, gpu }) = client.request(&IpcRequest::GetFansRPM) {
-        snapshot.cpu_fan = Some(cpu);
-        snapshot.gpu_fan = Some(gpu);
+    if let Ok(charge) = run_cli(&["charge"]) {
+        snapshot.charge_mode = charge.lines().nth(1).and_then(after_colon);
+        snapshot.battery_percent =
+            charge.lines().nth(2).and_then(number_after_colon).and_then(|n| u8::try_from(n).ok());
     }
-    if let Ok(IpcResponse::ChargeStatus(status)) = client.request(&IpcRequest::GetChargeStatus) {
-        snapshot.charge = Some(status);
+    if let Ok(power) = run_cli(&["power"]) {
+        snapshot.power_profile = power.lines().last().and_then(after_colon).and_then(|value| {
+            match value.to_ascii_lowercase().as_str() {
+                "silent" => Some(PowerProfile::Silent),
+                "default" => Some(PowerProfile::Default),
+                "performance" | "perf" => Some(PowerProfile::Performance),
+                _ => None,
+            }
+        });
     }
-    if let Ok(IpcResponse::Settings(settings)) =
-        client.request(&IpcRequest::DaemonCommand(ipc::DaemonCommand::GetSettings))
-    {
-        snapshot.settings = Some(*settings);
+    if let Ok(kbd) = run_cli(&["kbd"]) {
+        snapshot.keyboard_backlight = kbd.lines().last().and_then(after_colon).and_then(|value| match value
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "off" => Some(KeyboardBacklightLevel::Off),
+            "low" => Some(KeyboardBacklightLevel::Low),
+            "medium" => Some(KeyboardBacklightLevel::Medium),
+            "high" => Some(KeyboardBacklightLevel::High),
+            _ => None,
+        });
     }
-    snapshot
+}
+
+fn after_colon(line: &str) -> Option<String> {
+    line.split_once(':').map(|(_, value)| value.trim().to_owned())
+}
+
+fn number_after_colon(line: &str) -> Option<u16> {
+    let value = line.split_once(':')?.1;
+    let number: String = value
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    number.parse().ok()
+}
+
+fn two_values(output: &str) -> Option<(u16, u16)> {
+    let mut values = output.lines().filter_map(number_after_colon);
+    Some((values.next()?, values.next()?))
 }
 
 fn send_action(action: Action) -> String {
-    let (request, label) = match action {
-        Action::SetPower(profile) => (IpcRequest::SetPowerProfile(profile), "Power profile"),
-        Action::SetFan(fan, mode) => (
-            IpcRequest::SetFanMode { fan, mode },
-            "Fan mode",
-        ),
-        Action::SetBacklight(level) => (
-            IpcRequest::SetKeyboardBacklight(level),
-            "Keyboard backlight",
-        ),
+    let (args, label): (Vec<&str>, &str) = match action {
+        Action::SetPower(PowerProfile::Silent) => (vec!["power", "silent"], "Power profile"),
+        Action::SetPower(PowerProfile::Default) => (vec!["power", "default"], "Power profile"),
+        Action::SetPower(PowerProfile::Performance) => (vec!["power", "perf"], "Power profile"),
+        Action::SetFan(FanIndex::Cpu, FanMode::Auto) => (vec!["fan", "cpu", "auto"], "CPU fan"),
+        Action::SetFan(FanIndex::Cpu, FanMode::Full) => (vec!["fan", "cpu", "full"], "CPU fan"),
+        Action::SetFan(FanIndex::Gpu, FanMode::Auto) => (vec!["fan", "gpu", "auto"], "GPU fan"),
+        Action::SetFan(FanIndex::Gpu, FanMode::Full) => (vec!["fan", "gpu", "full"], "GPU fan"),
+        Action::SetFan(_, _) => return "Unsupported fan mode blocked".into(),
+        Action::SetBacklight(KeyboardBacklightLevel::Off) => (vec!["kbd", "off"], "Keyboard backlight"),
+        Action::SetBacklight(KeyboardBacklightLevel::Low) => (vec!["kbd", "low"], "Keyboard backlight"),
+        Action::SetBacklight(KeyboardBacklightLevel::Medium) => (vec!["kbd", "medium"], "Keyboard backlight"),
+        Action::SetBacklight(KeyboardBacklightLevel::High) => (vec!["kbd", "high"], "Keyboard backlight"),
+        Action::SetBacklight(_) => return "Unsupported backlight level blocked".into(),
     };
 
-    let mut client = match IpcClient::connect() {
-        Ok(client) => client,
-        Err(error) => return format!("Daemon unavailable: {error}"),
-    };
-
-    match client.request(&request) {
-        Ok(IpcResponse::Success) => format!("{label} updated"),
-        Ok(IpcResponse::Error(error)) => error.message,
-        Ok(response) => format!("Unexpected daemon response: {response:?}"),
-        Err(error) => format!("Command failed: {error}"),
+    match run_cli(&args) {
+        Ok(_) => format!("{label} updated"),
+        Err(error) => format!("{label}: {error}"),
     }
 }
 
