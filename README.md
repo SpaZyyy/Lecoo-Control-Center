@@ -117,7 +117,7 @@ Here are the primary commands for `lecoo-ctrl`:
 
 ## GUI
 
-A Graphical User Interface (GUI) is currently in development and will be available in a future release.
+A minimal native GUI is available in the `gui` workspace crate. Start the daemon, then run `cargo run -p gui` from the repository root. The window shows temperatures, fan speeds and battery state, and lets you change the power profile, fan modes and keyboard backlight.
 
 ## Telemetry & Data Collection
 
