@@ -9,4 +9,6 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
+eframe = "0.31"
 ipc = { path = "../ipc" }
+lecoo-types.workspace = true
