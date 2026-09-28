@@ -118,7 +118,7 @@ impl eframe::App for ControlCenter {
                     ui.set_min_height(182.0);
                     ui.heading("Performance");
                     ui.label("Power profile");
-                    let mut profile = self.snapshot.settings.as_ref().map(|s| s.power_profile);
+                    let profile = self.snapshot.settings.as_ref().map(|s| s.power_profile);
                     ui.horizontal_wrapped(|ui| {
                         for (choice, label) in [
                             (PowerProfile::Silent, "Quiet"),
