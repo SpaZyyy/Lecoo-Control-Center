@@ -128,7 +128,7 @@ impl eframe::App for ControlCenter {
                             if ui
                                 .add_enabled(
                                     self.snapshot.connected,
-                                    egui::Button::selectable(profile == Some(choice), label),
+                                    egui::Button::new(label).selected(profile == Some(choice)),
                                 )
                                 .clicked()
                             {
@@ -184,7 +184,7 @@ impl eframe::App for ControlCenter {
                             if ui
                                 .add_enabled(
                                     self.snapshot.connected,
-                                    egui::Button::selectable(current == choice, label),
+                                    egui::Button::new(label).selected(current == choice),
                                 )
                                 .clicked()
                             {
@@ -246,13 +246,13 @@ fn fan_controls(
         ui.label(label);
         ui.add_enabled_ui(snapshot.connected, |ui| {
             if ui
-                .add(egui::Button::selectable(mode == Some(FanMode::Auto), "Auto"))
+                .add(egui::Button::new("Auto").selected(mode == Some(FanMode::Auto)))
                 .clicked()
             {
                 let _ = actions.send(Action::SetFan(fan, FanMode::Auto));
             }
             if ui
-                .add(egui::Button::selectable(mode == Some(FanMode::Full), "Full"))
+                .add(egui::Button::new("Full").selected(mode == Some(FanMode::Full)))
                 .clicked()
             {
                 let _ = actions.send(Action::SetFan(fan, FanMode::Full));
