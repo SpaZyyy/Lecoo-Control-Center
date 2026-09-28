@@ -117,7 +117,7 @@ Here are the primary commands for `lecoo-ctrl`:
 
 ## GUI
 
-A minimal native GUI is available in the `gui` workspace crate. Start the daemon, then run `cargo run -p gui` from the repository root. The window shows temperatures, fan speeds and battery state, and lets you change the power profile, fan modes and keyboard backlight.
+The minimal Windows GUI uses the installed `lecoo-ctrl.exe` to communicate with the active Lecoo service. Install the Windows CLI, then run `cargo run -p gui` or open `target/release/gui.exe`. Temperatures and fan speeds refresh every second; power, charge and keyboard status refresh every five seconds. CLI commands run with no visible console window. The fan controls offer only Auto and Full speed; custom PWM and fan curves are not exposed.
 
 ## Telemetry & Data Collection
 
