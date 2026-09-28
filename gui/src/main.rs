@@ -139,8 +139,8 @@ impl eframe::App for ControlCenter {
 
                     ui.add_space(10.0);
                     ui.label("Fans");
-                    fan_controls(ui, &self.snapshot, FanIndex::Cpu, "CPU");
-                    fan_controls(ui, &self.snapshot, FanIndex::Gpu, "GPU");
+                    fan_controls(ui, &self.snapshot, &self.actions, FanIndex::Cpu, "CPU");
+                    fan_controls(ui, &self.snapshot, &self.actions, FanIndex::Gpu, "GPU");
                 });
 
                 columns[1].group(|ui| {
@@ -231,7 +231,13 @@ fn value_with_unit<T: std::fmt::Display>(value: Option<T>, unit: &str) -> String
     value.map(|value| format!("{value}{unit}")).unwrap_or_else(|| "—".into())
 }
 
-fn fan_controls(ui: &mut egui::Ui, snapshot: &Snapshot, fan: FanIndex, label: &str) {
+fn fan_controls(
+    ui: &mut egui::Ui,
+    snapshot: &Snapshot,
+    actions: &Sender<Action>,
+    fan: FanIndex,
+    label: &str,
+) {
     let mode = snapshot.settings.as_ref().map(|settings| match fan {
         FanIndex::Cpu => settings.fan_mode_cpu,
         FanIndex::Gpu => settings.fan_mode_gpu,
@@ -243,7 +249,13 @@ fn fan_controls(ui: &mut egui::Ui, snapshot: &Snapshot, fan: FanIndex, label: &s
                 .add(egui::Button::selectable(mode == Some(FanMode::Auto), "Auto"))
                 .clicked()
             {
-                // Actions are sent by the parent UI after this helper reports the selection.
+                let _ = actions.send(Action::SetFan(fan, FanMode::Auto));
+            }
+            if ui
+                .add(egui::Button::selectable(mode == Some(FanMode::Full), "Full"))
+                .clicked()
+            {
+                let _ = actions.send(Action::SetFan(fan, FanMode::Full));
             }
         });
     });
